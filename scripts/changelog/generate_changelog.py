@@ -89,20 +89,20 @@ def get_all_pages(endpoint, params=None):
 def get_previous_tag(current_tag):
     tags = git(
         "tag",
+        "--merged",
+        current_tag,
         "--sort=-version:refname"
     ).splitlines()
 
-    if current_tag not in tags:
-        raise RuntimeError(
-            f"Tag não encontrada: {current_tag}"
-        )
+    previous_tags = [
+        tag for tag in tags
+        if tag != current_tag
+    ]
 
-    index = tags.index(current_tag)
-
-    if index + 1 >= len(tags):
+    if not previous_tags:
         return None
 
-    return tags[index + 1]
+    return previous_tags[0]
 
 
 def get_release_commits(previous_tag, current_tag):
