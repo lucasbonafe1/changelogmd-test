@@ -29,3 +29,9 @@ Nenhuma alteração identificada nesta release.
 Nenhuma alteração identificada nesta release.
 
 [Compare Changes](https://github.com/lucasbonafe1/changelogmd-test/compare/v1.0.2...v1.0.3)
+
+## v1.0.4
+
+Nenhuma alteração identificada nesta release.
+
+[Compare Changes](https://github.com/lucasbonafe1/changelogmd-test/compare/v1.0.3...v1.0.4)
