@@ -40,6 +40,10 @@ jobs:
 
       - name: Generate Changelog
         env:
+          DEFAULT_BRANCH: main
+          DEVELOP_BRANCH: develop
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
