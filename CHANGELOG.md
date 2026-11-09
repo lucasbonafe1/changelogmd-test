@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.2.0 - 09/11/2026
+
+### feature/FSWSQD-1xxx:
+
+* fix: remove getter
+
+### hotfix/ID999:
+
+* fix: remove setter
+
+### Outras alterações:
+
+* fix: corrige script py e yml
+* chore: altera versão para 1.2.0
+
+## 1.1.2 - 09/11/2026
+
+Nenhuma alteração identificada nesta release.
+
+[Compare Changes](https://github.com/lucasbonafe1/changelogmd-test/compare/1.1.1...1.1.2)
+
+## 1.1.1 - 09/11/2026
+
+### Outras alterações
+
+- 09/11/2026
+  - chore: altera versão para 1.1.1
+  - fix: remove getter e setter
+
+[Compare Changes](https://github.com/lucasbonafe1/changelogmd-test/compare/1.1.0...1.1.1)
+
+## 1.1.0 - 09/11/2026
+
+### Funcionalidades
+
+- `feature/ID0` · 09/11/2026
+  - feat: nova classe
+  - feat: nova classe enum teste
+
+### Outras alterações
+
+- 09/11/2026
+  - Clean up CHANGELOG by removing empty version entries
+  - fix: altera get para private
+  - chore: altera versão para 1.1.0
+
+[Compare Changes](https://github.com/lucasbonafe1/changelogmd-test/compare/1.0.9...1.1.0)
+
 ## 1.0.9 - 09/11/2026
 
 ### Outras alterações
