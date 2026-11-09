@@ -1,295 +1,344 @@
+#!/usr/bin/env python3
+"""
+Gera CHANGELOG.md e RELEASE_NOTES.md a partir do histórico git.
 
-import json
+Pensado para o fluxo gitflow com branch `release`:
+
+  - O script roda na branch `release` (HEAD), ANTES do merge na main.
+  - O intervalo de commits é "tudo que está na release e ainda não foi
+    publicado em nenhuma tag estável anterior".
+  - Não usa a API do GitHub: `git flow feature finish` faz merge local,
+    sem Pull Request, então a fonte da verdade é o próprio histórico.
+  - Cada merge de uma branch de trabalho (feature/, fix/, fix/review/,
+    hotfix/...) vira um item do changelog, com os commits que ele trouxe.
+  - Merges entre branches de integração (develop, release, main) são
+    ignorados.
+
+Variáveis de ambiente:
+  RELEASE_VERSION   versão de PRD (ex.: 1.1.1). Alternativa: 1º argumento.
+  RELEASE_DATE      opcional, formato DD/MM/AAAA (padrão: hoje).
+  JIRA_BASE_URL     opcional, ex.: https://empresa.atlassian.net/browse
+  REPOSITORY_URL    opcional, para o link "Compare Changes".
+                    Se ausente, usa GITHUB_SERVER_URL/GITHUB_REPOSITORY.
+  INTEGRATION_BRANCHES  opcional, lista separada por vírgula.
+                    Padrão: main,master,develop,release
+"""
+
 import os
+import re
 import subprocess
 import sys
-
 from datetime import datetime
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError
-
 
 CHANGELOG_FILE = "CHANGELOG.md"
 RELEASE_NOTES_FILE = "RELEASE_NOTES.md"
 
+FIELD_SEP = "\x1f"
+LOG_FORMAT = FIELD_SEP.join(["%H", "%P", "%cI", "%s"])
+
+# Ignora commits gerados pela própria automação.
+IGNORED_TITLE_PREFIXES = ("docs(changelog)",)
+
+JIRA_KEY = re.compile(r"[A-Z][A-Z0-9]+-\d+")
+
+# Formas de mensagem de merge que o git / gitflow / GitHub geram.
+MERGE_PATTERNS = [
+    # Merge branch 'feature/X' into develop
+    re.compile(r"^Merge branch '(?P<branch>[^']+)'"),
+    # Merge remote-tracking branch 'origin/feature/X'
+    re.compile(r"^Merge remote-tracking branch '(?:[^/']+/)?(?P<branch>[^']+)'"),
+    # Merge pull request #12 from owner/feature/X
+    re.compile(r"^Merge pull request #\d+ from [^/\s]+/(?P<branch>\S+)"),
+]
+
+# (prefixo da branch, título da seção). A ordem define a ordem no changelog.
+SECTIONS = [
+    ("feature/", "Funcionalidades"),
+    ("fix/review/", "Correções de homologação"),
+    ("fix/", "Correções"),
+    ("bugfix/", "Correções"),
+    ("hotfix/", "Correções emergenciais (hotfix)"),
+]
+OTHER_SECTION = "Outras alterações"
+
+
+# --------------------------------------------------------------------------
+# Git
+# --------------------------------------------------------------------------
 
 def git(*args):
     return subprocess.check_output(
         ["git", *args],
-        text=True
+        text=True,
+        encoding="utf-8",
     ).strip()
 
 
-def parse_date(value):
-    return datetime.fromisoformat(
-        value.replace("Z", "+00:00")
-    )
+def git_log(*args):
+    """Retorna commits (mais novos primeiro) como lista de dicts."""
+    output = git("log", f"--format={LOG_FORMAT}", *args)
+    commits = []
 
-
-def api_get(endpoint, params=None):
-    repository = os.environ["GITHUB_REPOSITORY"]
-    token = os.environ["GITHUB_TOKEN"]
-
-    query = f"?{urlencode(params)}" if params else ""
-
-    url = (
-        f"https://api.github.com/repos/"
-        f"{repository}/{endpoint}{query}"
-    )
-
-    request = Request(
-        url,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28"
-        }
-    )
-
-    try:
-        with urlopen(request, timeout=30) as response:
-            return json.loads(
-                response.read().decode("utf-8")
-            )
-
-    except HTTPError as error:
-        raise RuntimeError(
-            f"GitHub API HTTP {error.code}: "
-            f"{error.read().decode('utf-8')}"
-        )
-
-
-def get_all_pages(endpoint, params=None):
-    results = []
-    page = 1
-
-    while True:
-        current_params = {
-            **(params or {}),
-            "per_page": 100,
-            "page": page
-        }
-
-        data = api_get(endpoint, current_params)
-
-        if not data:
-            break
-
-        results.extend(data)
-
-        if len(data) < 100:
-            break
-
-        page += 1
-
-    return results
-
-
-def get_previous_tag(current_tag):
-    tags = git(
-        "tag",
-        "--merged",
-        current_tag,
-        "--sort=-version:refname"
-    ).splitlines()
-
-    previous_tags = [
-        tag for tag in tags
-        if tag != current_tag
-    ]
-
-    if not previous_tags:
-        return None
-
-    return previous_tags[0]
-
-
-def get_release_commits(previous_tag, current_tag):
-    revision = (
-        f"{previous_tag}..{current_tag}"
-        if previous_tag
-        else current_tag
-    )
-
-    return set(
-        git("rev-list", revision).splitlines()
-    )
-
-
-def get_pull_request_commits(number):
-    return get_all_pages(
-        f"pulls/{number}/commits"
-    )
-
-
-def get_merged_pull_requests(target_branch):
-    pull_requests = get_all_pages(
-        "pulls",
-        {
-            "state": "closed",
-            "base": target_branch,
-            "sort": "updated",
-            "direction": "desc"
-        }
-    )
-
-    return [
-        pr for pr in pull_requests
-        if pr.get("merged_at")
-    ]
-
-
-def collect_pull_requests(release_commits):
-    default_branch = os.environ.get(
-        "DEFAULT_BRANCH",
-        "main"
-    )
-
-    develop_branch = os.environ.get(
-        "DEVELOP_BRANCH",
-        "develop"
-    )
-
-    target_branches = {
-        develop_branch,
-        default_branch
-    }
-
-    relevant_prs = {}
-
-    for target in target_branches:
-        pull_requests = get_merged_pull_requests(
-            target
-        )
-
-        for pr in pull_requests:
-            number = pr["number"]
-
-            if number in relevant_prs:
-                continue
-
-            commits = get_pull_request_commits(number)
-
-            merge_sha = pr.get("merge_commit_sha")
-
-            relevant = (
-                merge_sha in release_commits
-                or any(
-                    commit["sha"] in release_commits
-                    for commit in commits
-                )
-            )
-
-            if relevant:
-                relevant_prs[number] = {
-                    "branch": pr["head"]["ref"],
-                    "commits": commits
-                }
-
-    return relevant_prs
-
-
-def collect_changes(relevant_prs, release_commits):
-    branches = {}
-
-    for pr in relevant_prs.values():
-        branch_name = pr["branch"]
-
-        # Não documentar branches de integração
-        if branch_name in {
-            os.environ.get("DEFAULT_BRANCH", "main"),
-            os.environ.get("DEVELOP_BRANCH", "develop")
-        }:
+    for line in output.splitlines():
+        if not line:
             continue
 
-        if branch_name not in branches:
-            branches[branch_name] = {
-                "date": None,
-                "commits": {}
-            }
+        sha, parents, date, title = line.split(FIELD_SEP, 3)
+        commits.append({
+            "sha": sha,
+            "parents": parents.split(),
+            "date": datetime.fromisoformat(date),
+            "title": title,
+        })
 
-        branch = branches[branch_name]
-
-        for commit in pr["commits"]:
-            sha = commit["sha"]
-
-            # Considera somente commits da release.
-            # Para squash merge, utiliza o SHA do merge
-            # como critério de inclusão do PR.
-            committed_at = parse_date(
-                commit["commit"]["committer"]["date"]
-            )
-
-            title = (
-                commit["commit"]["message"]
-                .splitlines()[0]
-            )
-
-            branch["commits"][sha] = {
-                "title": title,
-                "date": committed_at
-            }
-
-            if (
-                branch["date"] is None
-                or committed_at > branch["date"]
-            ):
-                branch["date"] = committed_at
-
-    return branches
+    return commits
 
 
-def generate_markdown(
-    version,
-    branches,
-    previous_tag,
-    repository_url
-):
-    lines = [
-        f"## {version}",
-        ""
-    ]
+# --------------------------------------------------------------------------
+# Versões / tags
+# --------------------------------------------------------------------------
 
-    if not branches:
-        lines.extend([
-            "Nenhuma alteração identificada nesta release.",
-            ""
-        ])
+def parse_version(tag):
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", tag)
+    return tuple(int(n) for n in match.groups()) if match else None
 
-    sorted_branches = sorted(
-        branches.items(),
-        key=lambda item: item[1]["date"],
-        reverse=True
+
+def get_released_tags(version):
+    """
+    Tags estáveis (X.Y.Z, com ou sem 'v') anteriores à versão atual,
+    da mais nova para a mais antiga. Tags de pré-release são ignoradas.
+    """
+    current = parse_version(version)
+
+    if current is None:
+        raise ValueError(
+            f"Versão inválida: '{version}'. Use o formato X.Y.Z"
+        )
+
+    tags = []
+
+    for tag in git("tag", "--list").splitlines():
+        parsed = parse_version(tag)
+
+        if parsed is not None and parsed < current:
+            tags.append((parsed, tag))
+
+    tags.sort(reverse=True)
+
+    return [tag for _, tag in tags]
+
+
+# --------------------------------------------------------------------------
+# Classificação
+# --------------------------------------------------------------------------
+
+def integration_branches():
+    raw = os.environ.get(
+        "INTEGRATION_BRANCHES",
+        "main,master,develop,release"
     )
 
-    for branch_name, data in sorted_branches:
-        branch_date = data["date"].strftime("%d/%m/%Y")
+    return {item.strip() for item in raw.split(",") if item.strip()}
 
-        lines.append(
-            f"### {branch_name} - {branch_date}"
-        )
 
-        commits = sorted(
-            data["commits"].values(),
-            key=lambda item: item["date"]
-        )
+def is_integration_branch(name):
+    return name in integration_branches() or name.startswith("release/")
+
+
+def source_branch(title):
+    """Nome da branch de origem de um commit de merge, ou None."""
+    for pattern in MERGE_PATTERNS:
+        match = pattern.match(title)
+
+        if match:
+            return match.group("branch")
+
+    return None
+
+
+def section_for(branch_name):
+    name = (branch_name or "").lower()
+
+    for prefix, title in SECTIONS:
+        if name.startswith(prefix):
+            return title
+
+    return OTHER_SECTION
+
+
+def card_key(*texts):
+    for text in texts:
+        match = JIRA_KEY.search(text or "")
+
+        if match:
+            return match.group(0)
+
+    return None
+
+
+def is_noise(commit):
+    title = commit["title"]
+
+    return (
+        len(commit["parents"]) > 1
+        or title.startswith("Merge ")
+        or title.startswith(IGNORED_TITLE_PREFIXES)
+    )
+
+
+# --------------------------------------------------------------------------
+# Coleta
+# --------------------------------------------------------------------------
+
+def collect_changes(released_tags):
+    """
+    Retorna {chave: item}, onde cada item representa uma branch de trabalho
+    (ou um grupo de commits sem branch identificável).
+    """
+    exclusions = [f"^{tag}" for tag in released_tags]
+
+    # Tudo que está na release e não saiu em nenhuma tag anterior.
+    # Excluir TODAS as tags anteriores evita repetir hotfix já publicados,
+    # mesmo quando a tag do hotfix não é ancestral direta da release.
+    release_commits = list(reversed(git_log("HEAD", *exclusions)))
+
+    items = {}
+    assigned = set()
+
+    def add(key, branch, commits):
+        item = items.setdefault(key, {
+            "branch": branch,
+            "card": card_key(branch, *(c["title"] for c in commits)),
+            "commits": {},
+            "date": None,
+        })
 
         for commit in commits:
-            lines.append(
-                f"- {commit['title']}"
-            )
+            if is_noise(commit):
+                continue
+
+            item["commits"][commit["sha"]] = commit
+
+            if item["date"] is None or commit["date"] > item["date"]:
+                item["date"] = commit["date"]
+
+    # 1) Merges de branches de trabalho: feature, fix, fix/review, hotfix...
+    for merge in release_commits:
+        if len(merge["parents"]) < 2:
+            continue
+
+        branch = source_branch(merge["title"])
+
+        if not branch or is_integration_branch(branch):
+            continue
+
+        first_parent, second_parent = merge["parents"][:2]
+
+        # Commits que o merge trouxe, descontando o que já existia
+        # no destino (ex.: develop mergeada na feature no passo 3)
+        # e o que já foi publicado em tags anteriores.
+        brought = git_log(
+            f"{first_parent}..{second_parent}",
+            "--no-merges",
+            *exclusions
+        )
+
+        add(branch, branch, list(reversed(brought)))
+        assigned.update(c["sha"] for c in brought)
+
+    # 2) Commits que não vieram de merge identificável
+    #    (squash merge, commit direto, rebase...).
+    orphans = [
+        c for c in release_commits
+        if c["sha"] not in assigned and not is_noise(c)
+    ]
+
+    for commit in orphans:
+        key = card_key(commit["title"])
+        group = f"__orphan__{key or 'outros'}"
+
+        add(group, None, [commit])
+
+        if key:
+            items[group]["card"] = key
+
+    # Remove itens que ficaram vazios (ex.: só tinham merges).
+    return {k: v for k, v in items.items() if v["commits"]}
+
+
+# --------------------------------------------------------------------------
+# Markdown
+# --------------------------------------------------------------------------
+
+def jira_link(card):
+    base = os.environ.get("JIRA_BASE_URL", "").rstrip("/")
+
+    if base:
+        return f"[{card}]({base}/{card})"
+
+    return card
+
+
+def format_item(item):
+    parts = []
+
+    if item["card"]:
+        parts.append(f"**{jira_link(item['card'])}**")
+
+    if item["branch"]:
+        parts.append(f"`{item['branch']}`")
+
+    parts.append(item["date"].strftime("%d/%m/%Y"))
+
+    lines = [f"- {' · '.join(parts)}"]
+
+    commits = sorted(item["commits"].values(), key=lambda c: c["date"])
+
+    for commit in commits:
+        lines.append(f"  - {commit['title']}")
+
+    return lines
+
+
+def generate_markdown(version, release_date, items, previous_tag, repo_url):
+    lines = [f"## {version} - {release_date}", ""]
+
+    if not items:
+        lines.extend(["Nenhuma alteração identificada nesta release.", ""])
+
+    grouped = {}
+
+    for item in items.values():
+        grouped.setdefault(section_for(item["branch"]), []).append(item)
+
+    ordered_titles = []
+
+    for _, title in SECTIONS:
+        if title not in ordered_titles:
+            ordered_titles.append(title)
+
+    ordered_titles.append(OTHER_SECTION)
+
+    for title in ordered_titles:
+        section_items = grouped.get(title)
+
+        if not section_items:
+            continue
+
+        lines.extend([f"### {title}", ""])
+
+        for item in sorted(
+            section_items,
+            key=lambda i: i["date"],
+            reverse=True
+        ):
+            lines.extend(format_item(item))
 
         lines.append("")
 
-    if previous_tag:
-        compare_url = (
-            f"{repository_url}/compare/"
-            f"{previous_tag}...{version}"
-        )
-
+    if previous_tag and repo_url:
         lines.extend([
-            f"[Compare Changes]({compare_url})",
+            f"[Compare Changes]({repo_url}/compare/{previous_tag}...{version})",
             ""
         ])
 
@@ -297,106 +346,96 @@ def generate_markdown(
 
 
 def update_changelog(version, release_content):
+    """Insere a versão no TOPO do arquivo, substituindo se já existir."""
+    lines = []
+
     if os.path.exists(CHANGELOG_FILE):
-        with open(
-            CHANGELOG_FILE,
-            encoding="utf-8"
-        ) as file:
-            content = file.read()
-    else:
-        content = "# Changelog\n"
+        with open(CHANGELOG_FILE, encoding="utf-8") as file:
+            lines = file.read().splitlines()
 
-    lines = content.splitlines()
+    if lines and lines[0].strip() == "# Changelog":
+        lines = lines[1:]
 
-    start = next(
-        (
-            index
-            for index, line in enumerate(lines)
-            if line == f"## {version}"
-        ),
-        None
-    )
+    kept = []
+    skipping = False
 
-    if start is not None:
-        end = next(
-            (
-                index
-                for index in range(start + 1, len(lines))
-                if lines[index].startswith("## ")
-            ),
-            len(lines)
-        )
+    for line in lines:
+        if line.startswith("## "):
+            heading = line[3:].split(" - ")[0].strip()
+            skipping = heading == version
 
-        del lines[start:end]
+        if not skipping:
+            kept.append(line)
 
-    if not lines:
-        lines = ["# Changelog"]
+    body = "\n".join(kept).strip()
 
-    if lines[0] != "# Changelog":
-        lines.insert(0, "# Changelog")
+    updated = "# Changelog\n\n" + release_content.strip() + "\n"
 
-    updated = (
-        "\n".join(lines).rstrip()
-        + "\n\n"
-        + release_content.strip()
-        + "\n"
-    )
+    if body:
+        updated += "\n" + body + "\n"
 
-    with open(
-        CHANGELOG_FILE,
-        "w",
-        encoding="utf-8"
-    ) as file:
+    with open(CHANGELOG_FILE, "w", encoding="utf-8") as file:
         file.write(updated)
 
 
-def main():
-    version = os.environ["RELEASE_TAG"]
+# --------------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------------
 
-    repository_url = (
-        os.environ["GITHUB_SERVER_URL"]
-        + "/"
-        + os.environ["GITHUB_REPOSITORY"]
+def repository_url():
+    explicit = os.environ.get("REPOSITORY_URL")
+
+    if explicit:
+        return explicit.rstrip("/")
+
+    server = os.environ.get("GITHUB_SERVER_URL")
+    repository = os.environ.get("GITHUB_REPOSITORY")
+
+    if server and repository:
+        return f"{server}/{repository}"
+
+    return None
+
+
+def main():
+    version = (
+        os.environ.get("RELEASE_VERSION")
+        or (sys.argv[1] if len(sys.argv) > 1 else None)
+    )
+
+    if not version:
+        raise ValueError(
+            "Informe a versão via RELEASE_VERSION ou como argumento."
+        )
+
+    release_date = (
+        os.environ.get("RELEASE_DATE")
+        or datetime.now().strftime("%d/%m/%Y")
     )
 
     print(f"Gerando changelog da versão {version}")
 
-    previous_tag = get_previous_tag(version)
+    released_tags = get_released_tags(version)
+    previous_tag = released_tags[0] if released_tags else None
 
-    release_commits = get_release_commits(
-        previous_tag,
-        version
-    )
+    print(f"Tag anterior: {previous_tag or '(nenhuma)'}")
 
-    relevant_prs = collect_pull_requests(
-        release_commits
-    )
+    items = collect_changes(released_tags)
 
-    branches = collect_changes(
-        relevant_prs,
-        release_commits
-    )
-
-    release_content = generate_markdown(
+    content = generate_markdown(
         version,
-        branches,
+        release_date,
+        items,
         previous_tag,
-        repository_url
+        repository_url()
     )
 
-    update_changelog(
-        version,
-        release_content
-    )
+    update_changelog(version, content)
 
-    with open(
-        RELEASE_NOTES_FILE,
-        "w",
-        encoding="utf-8"
-    ) as file:
-        file.write(release_content)
+    with open(RELEASE_NOTES_FILE, "w", encoding="utf-8") as file:
+        file.write(content)
 
-    print("CHANGELOG.md atualizado com sucesso!")
+    print("CHANGELOG.md e RELEASE_NOTES.md atualizados com sucesso!")
 
 
 if __name__ == "__main__":
