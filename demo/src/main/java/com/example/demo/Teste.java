@@ -6,4 +6,7 @@ public class Teste {
     public Teste(String test) {
         this.test = test;
     }
+
+    public Teste() {
+    }
 }
