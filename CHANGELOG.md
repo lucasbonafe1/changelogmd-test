@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.2.0 - 09/11/2026
+
+### feature/FSWSQD-1xxx:
+
+* fix: remove getter
+
+### hotfix/ID999:
+
+* fix: remove setter
+
+### Outras alterações:
+
+* fix: corrige script py e yml
+* chore: altera versão para 1.2.0
+
 ## 1.1.2 - 09/11/2026
 
 Nenhuma alteração identificada nesta release.
