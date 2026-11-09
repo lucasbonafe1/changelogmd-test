@@ -35,3 +35,13 @@ Nenhuma alteração identificada nesta release.
 Nenhuma alteração identificada nesta release.
 
 [Compare Changes](https://github.com/lucasbonafe1/changelogmd-test/compare/v1.0.3...v1.0.4)
+
+## v1.0.5
+
+### feature/test2 - 09/11/2026
+- feat: test2
+
+### feature/test1 - 09/11/2026
+- feat: test1
+
+[Compare Changes](https://github.com/lucasbonafe1/changelogmd-test/compare/v1.0.3...v1.0.5)
