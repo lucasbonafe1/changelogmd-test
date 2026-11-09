@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.1 - 09/11/2026
+
+### Outras alterações
+
+- 09/11/2026
+  - chore: altera versão para 1.1.1
+  - fix: remove getter e setter
+
+[Compare Changes](https://github.com/lucasbonafe1/changelogmd-test/compare/1.1.0...1.1.1)
+
 ## 1.1.0 - 09/11/2026
 
 ### Funcionalidades
