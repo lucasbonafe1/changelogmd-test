@@ -6,12 +6,4 @@ public class Teste {
     public Teste(String test) {
         this.test = test;
     }
-
-    private String getTest() {
-        return test;
-    }
-
-    public void setTest(String test) {
-        this.test = test;
-    }
 }
