@@ -2,15 +2,14 @@ package com.example.demo;
 
 public class Teste {
     public String test;
+    public String teste;
 
     public Teste(String test) {
         this.test = test;
     }
 
     public Teste() {
-
     }
-
 
     public String getTest() {
         return test;
