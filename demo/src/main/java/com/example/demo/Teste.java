@@ -9,6 +9,8 @@ public class Teste {
 
     public Teste() {
     }
+
+
     public String getTest() {
         return test;
     }
