@@ -23,3 +23,9 @@ Nenhuma alteração identificada nesta release.
 - feat: adiciona construtor
 
 [Compare Changes](https://github.com/lucasbonafe1/changelogmd-test/compare/v1.0.1...v1.0.2)
+
+## v1.0.3
+
+Nenhuma alteração identificada nesta release.
+
+[Compare Changes](https://github.com/lucasbonafe1/changelogmd-test/compare/v1.0.2...v1.0.3)
