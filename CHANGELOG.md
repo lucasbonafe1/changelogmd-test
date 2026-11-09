@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.2 - 09/11/2026
+
+Nenhuma alteração identificada nesta release.
+
+[Compare Changes](https://github.com/lucasbonafe1/changelogmd-test/compare/1.1.1...1.1.2)
+
 ## 1.1.1 - 09/11/2026
 
 ### Outras alterações
