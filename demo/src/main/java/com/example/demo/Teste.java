@@ -6,4 +6,11 @@ public class Teste {
     public Teste(String test) {
         this.test = test;
     }
+
+    public Teste() {
+    }
+
+    public String getTest() {
+        return test;
+    }
 }

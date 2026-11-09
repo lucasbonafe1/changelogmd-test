@@ -1,27 +1,34 @@
 #!/usr/bin/env python3
 """
-Gera CHANGELOG.md e RELEASE_NOTES.md a partir do histórico git.
+Gera CHANGELOG.md a partir do histórico git, a cada merge na main.
 
-Pensado para o fluxo gitflow com branch `release`:
+Fluxo:
+  - O workflow roda na `main` quando recebe push (merge da release, ou
+    hotfix finish). O script descobre sozinho quais versões (tags X.Y.Z
+    alcançáveis pela main) ainda NÃO estão no CHANGELOG.md e gera uma
+    entrada para cada uma, da mais antiga para a mais nova.
+  - Para a versão X, o conteúdo é: tudo que está na tag X e não está em
+    nenhuma tag estável anterior. Hotfix já publicado não se repete.
+  - Não usa a API do GitHub: o changelog sai do histórico git.
+  - Cada merge de branch de trabalho (feature/, fix/, fix/review/,
+    hotfix/...) vira um grupo com os commits que ele trouxe. Merges entre
+    branches de integração (develop, release, main) são ignorados.
+  - Se o CHANGELOG.md ainda não tem nenhuma versão, gera só a tag mais nova
+    (não reescreve todo o histórico antigo).
 
-  - O script roda na branch `release` (HEAD), ANTES do merge na main.
-  - O intervalo de commits é "tudo que está na release e ainda não foi
-    publicado em nenhuma tag estável anterior".
-  - Não usa a API do GitHub: `git flow feature finish` faz merge local,
-    sem Pull Request, então a fonte da verdade é o próprio histórico.
-  - Cada merge de uma branch de trabalho (feature/, fix/, fix/review/,
-    hotfix/...) vira um item do changelog, com os commits que ele trouxe.
-  - Merges entre branches de integração (develop, release, main) são
-    ignorados.
+Variáveis de ambiente (todas opcionais):
+  RELEASE_VERSION       força uma versão específica (ex.: 1.1.1), em vez
+                        da detecção automática. Alternativa: 1º argumento.
+  RELEASE_DATE          DD/MM/AAAA (padrão: hoje).
+  INCLUDE_COMPARE_LINK  "true" adiciona o link "Compare Changes".
+  REPOSITORY_URL        usado pelo link acima. Se ausente, usa
+                        GITHUB_SERVER_URL/GITHUB_REPOSITORY.
+  INTEGRATION_BRANCHES  padrão: main,master,develop,release
 
-Variáveis de ambiente:
-  RELEASE_VERSION   versão de PRD (ex.: 1.1.1). Alternativa: 1º argumento.
-  RELEASE_DATE      opcional, formato DD/MM/AAAA (padrão: hoje).
-  JIRA_BASE_URL     opcional, ex.: https://empresa.atlassian.net/browse
-  REPOSITORY_URL    opcional, para o link "Compare Changes".
-                    Se ausente, usa GITHUB_SERVER_URL/GITHUB_REPOSITORY.
-  INTEGRATION_BRANCHES  opcional, lista separada por vírgula.
-                    Padrão: main,master,develop,release
+Saídas:
+  CHANGELOG.md                  versão mais nova no topo
+  .release-notes/<versão>.md    notas de cada versão gerada (não commitar)
+  .release-notes/versions.txt   versões geradas nesta execução
 """
 
 import os
@@ -31,7 +38,7 @@ import sys
 from datetime import datetime
 
 CHANGELOG_FILE = "CHANGELOG.md"
-RELEASE_NOTES_FILE = "RELEASE_NOTES.md"
+RELEASE_NOTES_DIR = ".release-notes"
 
 FIELD_SEP = "\x1f"
 LOG_FORMAT = FIELD_SEP.join(["%H", "%P", "%cI", "%s"])
@@ -51,15 +58,7 @@ MERGE_PATTERNS = [
     re.compile(r"^Merge pull request #\d+ from [^/\s]+/(?P<branch>\S+)"),
 ]
 
-# (prefixo da branch, título da seção). A ordem define a ordem no changelog.
-SECTIONS = [
-    ("feature/", "Funcionalidades"),
-    ("fix/review/", "Correções de homologação"),
-    ("fix/", "Correções"),
-    ("bugfix/", "Correções"),
-    ("hotfix/", "Correções emergenciais (hotfix)"),
-]
-OTHER_SECTION = "Outras alterações"
+OTHER_GROUP = "Outras alterações"
 
 
 # --------------------------------------------------------------------------
@@ -156,16 +155,6 @@ def source_branch(title):
     return None
 
 
-def section_for(branch_name):
-    name = (branch_name or "").lower()
-
-    for prefix, title in SECTIONS:
-        if name.startswith(prefix):
-            return title
-
-    return OTHER_SECTION
-
-
 def card_key(*texts):
     for text in texts:
         match = JIRA_KEY.search(text or "")
@@ -190,17 +179,18 @@ def is_noise(commit):
 # Coleta
 # --------------------------------------------------------------------------
 
-def collect_changes(released_tags):
+def collect_changes(ref, released_tags):
     """
     Retorna {chave: item}, onde cada item representa uma branch de trabalho
     (ou um grupo de commits sem branch identificável).
     """
     exclusions = [f"^{tag}" for tag in released_tags]
 
-    # Tudo que está na release e não saiu em nenhuma tag anterior.
+    # Tudo que está em `ref` (a tag da versão) e não saiu em nenhuma
+    # tag anterior.
     # Excluir TODAS as tags anteriores evita repetir hotfix já publicados,
     # mesmo quando a tag do hotfix não é ancestral direta da release.
-    release_commits = list(reversed(git_log("HEAD", *exclusions)))
+    release_commits = list(reversed(git_log(ref, *exclusions)))
 
     items = {}
     assigned = set()
@@ -270,32 +260,20 @@ def collect_changes(released_tags):
 # Markdown
 # --------------------------------------------------------------------------
 
-def jira_link(card):
-    base = os.environ.get("JIRA_BASE_URL", "").rstrip("/")
-
-    if base:
-        return f"[{card}]({base}/{card})"
-
-    return card
+def group_title(item):
+    """Título do grupo: nome da branch; sem branch, o card; senão genérico."""
+    return item["branch"] or item["card"] or OTHER_GROUP
 
 
 def format_item(item):
-    parts = []
-
-    if item["card"]:
-        parts.append(f"**{jira_link(item['card'])}**")
-
-    if item["branch"]:
-        parts.append(f"`{item['branch']}`")
-
-    parts.append(item["date"].strftime("%d/%m/%Y"))
-
-    lines = [f"- {' · '.join(parts)}"]
+    lines = [f"### {group_title(item)}:", ""]
 
     commits = sorted(item["commits"].values(), key=lambda c: c["date"])
 
     for commit in commits:
-        lines.append(f"  - {commit['title']}")
+        lines.append(f"* {commit['title']}")
+
+    lines.append("")
 
     return lines
 
@@ -306,37 +284,18 @@ def generate_markdown(version, release_date, items, previous_tag, repo_url):
     if not items:
         lines.extend(["Nenhuma alteração identificada nesta release.", ""])
 
-    grouped = {}
+    # Mais recentes primeiro; o grupo genérico sempre por último.
+    ordered = sorted(
+        items.values(),
+        key=lambda i: (group_title(i) == OTHER_GROUP, -i["date"].timestamp())
+    )
 
-    for item in items.values():
-        grouped.setdefault(section_for(item["branch"]), []).append(item)
+    for item in ordered:
+        lines.extend(format_item(item))
 
-    ordered_titles = []
+    include_link = os.environ.get("INCLUDE_COMPARE_LINK", "").lower() == "true"
 
-    for _, title in SECTIONS:
-        if title not in ordered_titles:
-            ordered_titles.append(title)
-
-    ordered_titles.append(OTHER_SECTION)
-
-    for title in ordered_titles:
-        section_items = grouped.get(title)
-
-        if not section_items:
-            continue
-
-        lines.extend([f"### {title}", ""])
-
-        for item in sorted(
-            section_items,
-            key=lambda i: i["date"],
-            reverse=True
-        ):
-            lines.extend(format_item(item))
-
-        lines.append("")
-
-    if previous_tag and repo_url:
+    if include_link and previous_tag and repo_url:
         lines.extend([
             f"[Compare Changes]({repo_url}/compare/{previous_tag}...{version})",
             ""
@@ -362,7 +321,7 @@ def update_changelog(version, release_content):
     for line in lines:
         if line.startswith("## "):
             heading = line[3:].split(" - ")[0].strip()
-            skipping = heading == version
+            skipping = same_version(heading, version)
 
         if not skipping:
             kept.append(line)
@@ -382,6 +341,64 @@ def update_changelog(version, release_content):
 # Main
 # --------------------------------------------------------------------------
 
+def same_version(a, b):
+    pa, pb = parse_version(a), parse_version(b)
+    return pa is not None and pa == pb
+
+
+def documented_versions():
+    """Versões que já têm seção no CHANGELOG.md."""
+    if not os.path.exists(CHANGELOG_FILE):
+        return set()
+
+    found = set()
+
+    with open(CHANGELOG_FILE, encoding="utf-8") as file:
+        for line in file:
+            if line.startswith("## "):
+                parsed = parse_version(line[3:].split(" - ")[0].strip())
+
+                if parsed:
+                    found.add(parsed)
+
+    return found
+
+
+def pending_versions():
+    """Tags estáveis alcançáveis pelo HEAD que ainda não estão no changelog."""
+    stable = []
+
+    for tag in git("tag", "--merged", "HEAD").splitlines():
+        parsed = parse_version(tag)
+
+        if parsed:
+            stable.append((parsed, tag))
+
+    stable.sort()
+
+    documented = documented_versions()
+
+    if not documented:
+        # Primeira execução: só a versão mais nova.
+        return [tag for _, tag in stable[-1:]]
+
+    newest_documented = max(documented)
+
+    return [
+        tag for parsed, tag in stable
+        if parsed not in documented and parsed > newest_documented
+    ]
+
+
+def resolve_ref(version):
+    """Usa a tag da versão; se ela não existir ainda, usa o HEAD."""
+    try:
+        git("rev-parse", "-q", "--verify", f"refs/tags/{version}")
+        return version
+    except subprocess.CalledProcessError:
+        return "HEAD"
+
+
 def repository_url():
     explicit = os.environ.get("REPOSITORY_URL")
 
@@ -397,30 +414,15 @@ def repository_url():
     return None
 
 
-def main():
-    version = (
-        os.environ.get("RELEASE_VERSION")
-        or (sys.argv[1] if len(sys.argv) > 1 else None)
-    )
-
-    if not version:
-        raise ValueError(
-            "Informe a versão via RELEASE_VERSION ou como argumento."
-        )
-
-    release_date = (
-        os.environ.get("RELEASE_DATE")
-        or datetime.now().strftime("%d/%m/%Y")
-    )
-
+def generate_version(version, release_date):
     print(f"Gerando changelog da versão {version}")
 
     released_tags = get_released_tags(version)
     previous_tag = released_tags[0] if released_tags else None
 
-    print(f"Tag anterior: {previous_tag or '(nenhuma)'}")
+    print(f"  Tag anterior: {previous_tag or '(nenhuma)'}")
 
-    items = collect_changes(released_tags)
+    items = collect_changes(resolve_ref(version), released_tags)
 
     content = generate_markdown(
         version,
@@ -432,10 +434,43 @@ def main():
 
     update_changelog(version, content)
 
-    with open(RELEASE_NOTES_FILE, "w", encoding="utf-8") as file:
+    with open(
+        os.path.join(RELEASE_NOTES_DIR, f"{version}.md"),
+        "w",
+        encoding="utf-8"
+    ) as file:
         file.write(content)
 
-    print("CHANGELOG.md e RELEASE_NOTES.md atualizados com sucesso!")
+
+def main():
+    forced = (
+        os.environ.get("RELEASE_VERSION")
+        or (sys.argv[1] if len(sys.argv) > 1 else None)
+    )
+
+    versions = [forced] if forced else pending_versions()
+
+    os.makedirs(RELEASE_NOTES_DIR, exist_ok=True)
+
+    release_date = (
+        os.environ.get("RELEASE_DATE")
+        or datetime.now().strftime("%d/%m/%Y")
+    )
+
+    if not versions:
+        print("Nenhuma versão nova (tag) para documentar. Nada a fazer.")
+
+    for version in versions:
+        generate_version(version, release_date)
+
+    with open(
+        os.path.join(RELEASE_NOTES_DIR, "versions.txt"),
+        "w",
+        encoding="utf-8"
+    ) as file:
+        file.write("\n".join(versions) + ("\n" if versions else ""))
+
+    print("Concluído.")
 
 
 if __name__ == "__main__":

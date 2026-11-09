@@ -1,21 +1,21 @@
 name: Generate Changelog
 
-# Executado manualmente (Actions > Generate Changelog > Run workflow)
-# quando o cliente aprovou os itens em HML e a subida para PRD foi liberada.
-# Roda na branch `release`, ANTES do merge na main.
+# Roda sempre que a main recebe push (merge da release, hotfix finish...).
+# Também roda no push de tag: se a tag chegar depois do merge, ela é
+# processada na mesma hora. A execução é idempotente: se não há versão
+# nova (tag) sem entrada no CHANGELOG.md, não faz nada.
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Versão de PRD (ex.: 1.1.1)"
-        required: true
-        type: string
+  push:
+    branches:
+      - main
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
 
 permissions:
   contents: write
 
 concurrency:
-  group: changelog-release
+  group: changelog
   cancel-in-progress: false
 
 jobs:
@@ -23,31 +23,20 @@ jobs:
     name: Generate and Publish Changelog
     runs-on: ubuntu-latest
 
+    # Evita reprocessar o commit do próprio bot.
+    if: ${{ !startsWith(github.event.head_commit.message, 'docs(changelog)') }}
+
     steps:
-      - name: Checkout release branch
+      - name: Checkout main
         uses: actions/checkout@v4
         with:
-          ref: release
-          fetch-depth: 0   # necessário para histórico completo e tags
+          ref: main
+          fetch-depth: 0   # histórico completo + tags
 
       - name: Configure Git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Validate version
-        env:
-          VERSION: ${{ inputs.version }}
-        run: |
-          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Versão inválida: '$VERSION'. Use o formato X.Y.Z"
-            exit 1
-          fi
-
-          if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
-            echo "A tag $VERSION já existe."
-            exit 1
-          fi
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -56,31 +45,68 @@ jobs:
 
       - name: Generate Changelog
         env:
-          RELEASE_VERSION: ${{ inputs.version }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_SERVER_URL: ${{ github.server_url }}
-          # JIRA_BASE_URL: https://SUA-EMPRESA.atlassian.net/browse
         run: python scripts/changelog/generate_changelog.py
 
-      - name: Commit changelog and create tag on release
-        env:
-          VERSION: ${{ inputs.version }}
+      - name: Check generated versions
+        id: versions
+        run: |
+          if [ -s .release-notes/versions.txt ]; then
+            echo "has_versions=true" >> "$GITHUB_OUTPUT"
+            echo "Versões geradas:"
+            cat .release-notes/versions.txt
+          else
+            echo "has_versions=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Nenhuma tag nova para documentar. Se este merge é uma entrega, crie a tag X.Y.Z na release e dê push."
+          fi
+
+      - name: Commit changelog on main
+        if: steps.versions.outputs.has_versions == 'true'
         run: |
           git add CHANGELOG.md
 
-          if ! git diff --cached --quiet; then
-            git commit -m "docs(changelog): atualiza versão ${VERSION}"
+          if git diff --cached --quiet; then
+            echo "Nenhuma alteração no CHANGELOG.md"
+          else
+            git commit -m "docs(changelog): atualiza $(paste -sd, .release-notes/versions.txt)"
+            git pull --rebase origin main
+            git push origin HEAD:main
           fi
 
-          git tag -a "$VERSION" -m "Release $VERSION"
-          git push origin HEAD:release "$VERSION"
+      - name: Sync CHANGELOG.md to develop
+        if: steps.versions.outputs.has_versions == 'true'
+        continue-on-error: true   # develop pode ser protegida; não derruba a execução
+        run: |
+          git fetch origin develop
+          git checkout -B develop origin/develop
+          git checkout main -- CHANGELOG.md
 
-      - name: Publish GitHub Release
+          if git diff --cached --quiet; then
+            echo "develop já está sincronizada"
+          else
+            git commit -m "docs(changelog): sincroniza com a main"
+            git push origin develop
+          fi
+
+          git checkout main
+
+      - name: Publish GitHub Releases
+        if: steps.versions.outputs.has_versions == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ inputs.version }}
         run: |
-          gh release create "$VERSION" \
-            --title "$VERSION" \
-            --notes-file RELEASE_NOTES.md \
-            --target release
+          while read -r version; do
+            [ -z "$version" ] && continue
+
+            if gh release view "$version" >/dev/null 2>&1; then
+              gh release edit "$version" \
+                --title "$version" \
+                --notes-file ".release-notes/${version}.md"
+            else
+              gh release create "$version" \
+                --title "$version" \
+                --notes-file ".release-notes/${version}.md" \
+                --verify-tag
+            fi
+          done < .release-notes/versions.txt
