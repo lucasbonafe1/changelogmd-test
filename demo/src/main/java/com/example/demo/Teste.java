@@ -7,10 +7,7 @@ public class Teste {
         this.test = test;
     }
 
-    public Teste() {
-    }
-
-    public String getTest() {
+    private String getTest() {
         return test;
     }
 
